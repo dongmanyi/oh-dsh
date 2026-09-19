@@ -1458,11 +1458,48 @@ test('an interrupted download fails cleanly and recovers on a rerun', { skip: sk
     assert.match(failing.stderr, /failed to download/)
     assert.ok(!(await exists(payload)), 'a failed download must not stage a payload')
     assert.ok(!(await exists(join(bin, 'ohdsh'))), 'a failed download must not install a launcher')
+    const downloadDir = join(home, '.ohdsh', 'installer', 'downloads')
+    const partialFiles = await readdir(downloadDir)
+    assert.equal(partialFiles.length, 1)
+    const partial = await readFile(join(downloadDir, partialFiles[0]!))
+    assert.ok(partial.length > 0 && partial.length < good.bytes.length)
 
-    github.publish('v0.1.8', [await makeSurfaceArchive('web', '0.1.8', 'linux', 'x64', 'interrupted')])
+    github.truncateAsset('v0.1.8', good.name, false)
     const rerun = await runInstaller(args, env)
     assert.equal(rerun.status, 0, rerun.stderr)
+    assert.deepEqual(github.downloadRangeHeaders('v0.1.8', good.name), [
+      undefined,
+      `bytes=${partial.length}-`,
+    ])
+    assert.deepEqual(await readdir(downloadDir), [])
     assert.match(await readFile(join(payload, 'bin', 'ohdsh'), 'utf8'), /interrupted/)
+  } finally {
+    await github.stop()
+  }
+})
+
+test('the Unix installer restarts safely when a mirror ignores Range', { skip: skipOnWindows }, async () => {
+  const github = new MockGitHub()
+  await github.start()
+  try {
+    const asset = await makeSurfaceArchive('tui', '0.1.8', 'linux', 'x64', 'range-fallback')
+    github.publish('v0.1.8', [asset])
+    github.truncateAsset('v0.1.8', asset.name)
+    const { home, env } = await makeSandbox(github)
+    const args = [
+      '--surface', 'tui', '--os', 'linux', '--arch', 'x64',
+      '--dest', join(home, 'payload'), '--bin-dir', join(home, 'bin'),
+    ]
+    assert.notEqual((await runInstaller(args, env)).status, 0)
+
+    github.truncateAsset('v0.1.8', asset.name, false)
+    github.ignoreRangeRequests = true
+    const retried = await runInstaller(args, env)
+    assert.equal(retried.status, 0, retried.stderr)
+    assert.equal(github.downloadCount('v0.1.8', asset.name), 3)
+    assert.match(github.downloadRangeHeaders('v0.1.8', asset.name)[1] ?? '', /^bytes=\d+-$/)
+    assert.equal(github.downloadRangeHeaders('v0.1.8', asset.name)[2], undefined)
+    assert.match(await readFile(join(home, 'payload', 'bin', 'ohdsh'), 'utf8'), /range-fallback/)
   } finally {
     await github.stop()
   }

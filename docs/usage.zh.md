@@ -90,6 +90,10 @@ pnpm run dist:mac && sh install.sh --local --surface desktop --force
 - 升级采用原地替换：新安装验证通过后，旧的应用包、AppImage 或载荷会连同
   残留的暂存目录与升级前备份一起删除，每个 surface 只保留一份 Oh-DSH
   安装。
+- macOS 和 Linux 下载中断后，部分文件默认保留在
+  `~/.ohdsh/installer/downloads`（或 `OH_DSH_INSTALLER_HOME`）中。重新运行
+  安装器会使用 HTTP Range 续传；若服务器不支持 Range，则重新下载整个资产。
+  安装前始终校验发布的 SHA-256，安装成功后删除缓存。
 - 在 macOS 上，desktop 会刷新 Launch Services 并清退残留的
   `Oh-DSH-Desktop.app`，只显示一个应用入口。未公证构建仍可能需要下文的
   右键 **打开** 首次放行。

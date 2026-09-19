@@ -13,6 +13,7 @@ type MockAsset = { name: string; bytes: Buffer; sha256: string; truncated?: bool
 export class MockGitHub {
   private readonly releases = new Map<string, MockAsset[]>()
   private readonly downloads = new Map<string, number>()
+  private readonly downloadRanges = new Map<string, Array<string | undefined>>()
   private readonly requests: string[] = []
   private authorizedDownloads = 0
   private authorizedApiRequests = 0
@@ -22,6 +23,8 @@ export class MockGitHub {
   downloadBase = ''
   /** Serve pretty-printed (whitespace-rich) JSON to exercise parser tolerance. */
   pretty = false
+  /** Simulate a mirror that ignores Range and sends the full archive. */
+  ignoreRangeRequests = false
 
   async start(): Promise<void> {
     this.server = createServer((req, res) => {
@@ -49,6 +52,11 @@ export class MockGitHub {
         if (asset) {
           const key = `${download[1]}/${download[2]}`
           this.downloads.set(key, (this.downloads.get(key) ?? 0) + 1)
+          const requestedRange = req.headers.range
+          this.downloadRanges.set(key, [
+            ...(this.downloadRanges.get(key) ?? []),
+            requestedRange,
+          ])
           if (req.headers.authorization !== undefined) this.authorizedDownloads += 1
           if (asset.truncated) {
             res.writeHead(200, {
@@ -56,7 +64,23 @@ export class MockGitHub {
               'content-length': asset.bytes.length,
             })
             res.write(asset.bytes.subarray(0, Math.max(1, Math.floor(asset.bytes.length / 2))))
-            res.destroy()
+            // Give the client time to receive the partial body before the
+            // connection drops, as a real interrupted transfer would.
+            setTimeout(() => res.destroy(), 25)
+            return
+          }
+          if (requestedRange !== undefined && !this.ignoreRangeRequests) {
+            const match = /^bytes=(\d+)-$/.exec(requestedRange)
+            const start = match === null ? NaN : Number(match[1])
+            if (!Number.isSafeInteger(start) || start >= asset.bytes.length) {
+              send(416, '', 'text/plain')
+              return
+            }
+            res.writeHead(206, {
+              'content-type': 'application/octet-stream',
+              'content-range': `bytes ${start}-${asset.bytes.length - 1}/${asset.bytes.length}`,
+            })
+            res.end(asset.bytes.subarray(start))
             return
           }
           send(200, asset.bytes, 'application/octet-stream')
@@ -105,10 +129,10 @@ export class MockGitHub {
     asset.bytes = bytes
   }
 
-  truncateAsset(tag: string, name: string): void {
+  truncateAsset(tag: string, name: string, truncated = true): void {
     const asset = this.releases.get(tag)?.find(candidate => candidate.name === name)
     if (asset === undefined) throw new Error(`unknown asset ${tag}/${name}`)
-    asset.truncated = true
+    asset.truncated = truncated
   }
 
   releaseJson(tag: string): string {
@@ -151,6 +175,10 @@ export class MockGitHub {
 
   downloadCount(tag: string, name: string): number {
     return this.downloads.get(`${tag}/${name}`) ?? 0
+  }
+
+  downloadRangeHeaders(tag: string, name: string): Array<string | undefined> {
+    return this.downloadRanges.get(`${tag}/${name}`) ?? []
   }
 
   sawRequest(fragment: string): boolean {

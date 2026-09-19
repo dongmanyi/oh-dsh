@@ -932,6 +932,8 @@ else
   digest=$(json_asset_digest "$release_json" "$asset")
   [ -n "$digest" ] \
     || die "release $tag publishes no sha256 digest for $asset; verify the asset list at https://github.com/$repo/releases/tag/$tag"
+  [ "${#digest}" -eq 64 ] \
+    || die "release $tag has invalid sha256 digest for $asset"
 fi
 
 # Refuse un-markable values before anything is downloaded or replaced, so a
@@ -965,14 +967,38 @@ if [ "$local_install" = 1 ]; then
   log "Installing locally built $asset from $local_artifact_dir"
   log "Local build sha256:$digest"
 else
-  archive="$workdir/$asset"
+  download_dir=$record_home/downloads
+  mkdir -p "$download_dir" \
+    || die "could not create download cache at $download_dir"
+  archive="$download_dir/$asset.$digest.part"
   url="$download_base/$repo/releases/download/$tag/$asset"
-  log "Downloading $asset"
-  download_curl -o "$archive" "$url" \
-    || die "failed to download $url"
+  if [ -f "$archive" ] && [ "$(sha256_file "$archive")" = "$digest" ]; then
+    log "Using verified download $asset"
+  else
+    log "Downloading $asset"
+    if [ -s "$archive" ]; then
+      if download_curl -C - -o "$archive" "$url"; then
+        :
+      else
+        download_status=$?
+        if [ "$download_status" -ne 33 ]; then
+          die "failed to download $url"
+        fi
+        # A server that ignores Range makes curl exit 33. Restart the full
+        # transfer rather than appending it to the cached partial archive.
+        rm -f "$archive"
+        download_curl -o "$archive" "$url" \
+          || die "failed to download $url"
+      fi
+    else
+      download_curl -o "$archive" "$url" \
+        || die "failed to download $url"
+    fi
+  fi
 
   actual=$(sha256_file "$archive")
   if [ "$actual" != "$digest" ]; then
+    rm -f "$archive"
     die "checksum mismatch for $asset: expected sha256:$digest, got sha256:$actual; the previous installation was left untouched"
   fi
   log "Verified sha256:$digest"
@@ -1349,4 +1375,7 @@ case "$surface:$os" in
   *) die "no install path for surface '$surface' on '$os'" ;;
 esac
 
+if [ "$local_install" != 1 ]; then
+  rm -f "$archive"
+fi
 log "Done"

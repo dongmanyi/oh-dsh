@@ -103,6 +103,11 @@ Upgrade, verification, and uninstall behavior:
   previous app bundle, AppImage, or payload is deleted along with any stale
   staging directories and pre-upgrade backups, so exactly one Oh-DSH
   installation remains per surface.
+- On macOS and Linux, an interrupted asset download stays under
+  `~/.ohdsh/installer/downloads` by default (or `OH_DSH_INSTALLER_HOME`).
+  Re-running the installer resumes with HTTP Range. If the server ignores
+  Range, the installer downloads the full asset again. The published SHA-256
+  is always checked before installation; successful installs remove the cache.
 - On macOS the desktop surface refreshes Launch Services and retires a
   stale `Oh-DSH-Desktop.app` bundle, so a single application entry shows.
   An unnotarized build may still need the right-click **Open** approval
