@@ -19,6 +19,8 @@ SHA-256 as the cache key. On a later invocation, curl continues from the
 cached byte count with HTTP Range. If curl reports that the server cannot
 resume (exit 33), the installer deletes the partial file and retries from
 the start. A complete verified cache entry can be reused without a request.
+If the record root cannot hold downloads, this invocation uses its temporary
+staging directory instead; record-writing errors are still reported at commit.
 
 The published SHA-256 is checked before any installation change. A mismatch
 deletes the cached file, while a failed transfer retains it. Successful

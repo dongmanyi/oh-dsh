@@ -968,8 +968,13 @@ if [ "$local_install" = 1 ]; then
   log "Local build sha256:$digest"
 else
   download_dir=$record_home/downloads
-  mkdir -p "$download_dir" \
-    || die "could not create download cache at $download_dir"
+  if ! mkdir -p "$download_dir" 2>/dev/null; then
+    # The record root may be unwritable or intentionally blocked. Keep the
+    # download usable so the later record commit can report its own failure.
+    download_dir=$workdir/downloads
+    mkdir -p "$download_dir" \
+      || die "could not create temporary download directory at $download_dir"
+  fi
   archive="$download_dir/$asset.$digest.part"
   url="$download_base/$repo/releases/download/$tag/$asset"
   if [ -f "$archive" ] && [ "$(sha256_file "$archive")" = "$digest" ]; then
