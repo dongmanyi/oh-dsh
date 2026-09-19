@@ -271,26 +271,59 @@ export class RuntimeUpdateManager {
       const updateRoot = join(this.#options.dataRoot, RUNTIMES_DIRECTORY)
       const downloadsRoot = join(updateRoot, 'downloads')
       mkdirSync(downloadsRoot, { recursive: true })
-      const archivePath = join(downloadsRoot, candidate.fileName)
+      // A published digest binds the partial bytes to this exact release.
+      // Older releases without a sidecar keep the former full-download path.
+      const expectedHash = await this.#downloadSha256(candidate)
+      const archivePath = join(downloadsRoot, `${candidate.fileName}.${expectedHash ?? 'unverified'}.part`)
+      let resumeFrom = expectedHash === null ? 0 : bundleSize(archivePath) ?? 0
+      if (candidate.size !== null && resumeFrom > candidate.size) {
+        rmSync(archivePath, { force: true })
+        resumeFrom = 0
+      }
 
-      this.#setState({ status: 'downloading', bundledVersion: this.#options.bundledVersion, candidate, currentVersion: this.#options.currentVersion, total: candidate.size, transferred: 0 })
+      this.#setState({ status: 'downloading', bundledVersion: this.#options.bundledVersion, candidate, currentVersion: this.#options.currentVersion, total: candidate.size, transferred: resumeFrom })
       const fetchImpl = this.#options.fetchImpl ?? fetch
-      const response = await fetchImpl(candidate.downloadUrl)
+      let response = await fetchImpl(candidate.downloadUrl, resumeFrom > 0 ? { headers: { range: `bytes=${String(resumeFrom)}-` } } : undefined)
+      if (resumeFrom > 0 && response.status === 416) {
+        rmSync(archivePath, { force: true })
+        resumeFrom = 0
+        response = await fetchImpl(candidate.downloadUrl)
+      }
       if (!response.ok) throw new Error(`bundle download failed with HTTP ${String(response.status)}`)
-      const total = response.headers.get('content-length') !== null ? Number(response.headers.get('content-length')) : candidate.size
+      let rangeTotal: number | null = null
+      if (resumeFrom > 0 && response.status === 206) {
+        const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get('content-range') ?? '')
+        if (range === null || Number(range[1]) !== resumeFrom || Number(range[2]) < resumeFrom
+          || Number(range[2]) >= Number(range[3])
+          || (candidate.size !== null && Number(range[3]) !== candidate.size)) {
+          rmSync(archivePath, { force: true })
+          throw new Error('bundle server returned an invalid Content-Range; retry the download')
+        }
+        rangeTotal = Number(range[3])
+      } else if (response.status !== 200) {
+        throw new Error(`bundle download returned unexpected HTTP ${String(response.status)}`)
+      } else {
+        // A server may ignore Range; replacing the partial avoids corruption.
+        resumeFrom = 0
+      }
+      const contentLength = response.headers.get('content-length')
+      const total = response.status === 206
+        ? candidate.size ?? rangeTotal
+        : contentLength !== null ? Number(contentLength) : candidate.size
+      if (response.body === null) throw new Error('bundle download returned an empty body')
       const body = Readable.fromWeb(response.body as import('node:stream/web').ReadableStream)
-      let transferred = 0
+      let transferred = resumeFrom
       body.on('data', (chunk: Buffer) => {
         transferred += chunk.length
         this.#setState({ status: 'downloading', bundledVersion: this.#options.bundledVersion, candidate, currentVersion: this.#options.currentVersion, total, transferred })
       })
-      await pipeline(body, createWriteStream(archivePath))
+      await pipeline(body, createWriteStream(archivePath, { flags: resumeFrom > 0 ? 'a' : 'w' }))
 
       stage = 'verify'
       this.#setState({ status: 'staging', bundledVersion: this.#options.bundledVersion, candidate, currentVersion: this.#options.currentVersion, stage: 'verify' })
-      const expectedHash = await this.#downloadSha256(candidate)
       const actualHash = await sha256File(archivePath)
       if (expectedHash !== null && expectedHash !== actualHash) {
+        rmSync(archivePath, { force: true })
         throw new Error(`runtime bundle integrity mismatch: expected ${expectedHash}, received ${actualHash}`)
       }
 

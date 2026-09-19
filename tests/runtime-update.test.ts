@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
@@ -76,7 +77,7 @@ test('staged runtime pointer resolves only valid deployments', () => {
   }
 })
 
-function fakeReleasesResponse(assets: Array<{ name: string }>): Response {
+function fakeReleasesResponse(assets: Array<{ name: string; size?: number }>): Response {
   return new Response(JSON.stringify([
     {
       tag_name: 'v0.1.8',
@@ -87,7 +88,7 @@ function fakeReleasesResponse(assets: Array<{ name: string }>): Response {
       assets: assets.map(asset => ({
         browser_download_url: `https://example.test/${asset.name}`,
         name: asset.name,
-        size: 1024,
+        size: asset.size ?? 1024,
       })),
     },
   ]), { status: 200 })
@@ -179,6 +180,86 @@ test('runtime update manager stages, verifies, and activates a bundle', async ()
     rmSync(fixtureRoot, { recursive: true, force: true })
   }
 })
+
+for (const supportsRange of [true, false]) {
+  test(`runtime update ${supportsRange ? 'resumes' : 'restarts'} after a dropped download`, { timeout: 5000 }, async () => {
+    const dataRoot = mkdtempSync(join(tmpdir(), 'oh-dsh-runtime-resume-'))
+    const fixtureRoot = mkdtempSync(join(tmpdir(), 'oh-dsh-runtime-resume-fixture-'))
+    const version = '0.1.1-rc.2'
+    const fileName = `oh-dsh-runtime-${version}-darwin-arm64.tar.gz`
+    const bytes = Buffer.from('runtime-bundle-content-for-resume')
+    const digest = createHash('sha256').update(bytes).digest('hex')
+    const cut = 10
+    const ranges: Array<string | null> = []
+    let requests = 0
+    try {
+      const fixtureRuntime = stagedLayout(fixtureRoot, version)
+      const manager = new RuntimeUpdateManager({
+        runtimeContract: 1,
+        arch: 'arm64',
+        bundledVersion: '0.1.0-rc.7',
+        currentVersion: '0.1.0-rc.7',
+        dataRoot,
+        fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input)
+          if (url.includes('/releases')) return fakeReleasesResponse([{ name: fileName, size: bytes.length }])
+          if (url.endsWith('.sha256')) return new Response(`${digest}  ${fileName}\n`, { status: 200 })
+          ranges.push(new Headers(init?.headers).get('range'))
+          requests += 1
+          if (requests === 1) {
+            const interrupted = Readable.from((async function* () {
+              yield bytes.subarray(0, cut)
+              const partialPath = join(dataRoot, 'runtimes', 'downloads', `${fileName}.${digest}.part`)
+              for (let attempt = 0; attempt < 100; attempt += 1) {
+                if (existsSync(partialPath) && statSync(partialPath).size === cut) break
+                await new Promise(resolve => setTimeout(resolve, 5))
+              }
+              throw new Error('connection dropped')
+            })())
+            return new Response(Readable.toWeb(interrupted) as unknown as ReadableStream, { status: 200 })
+          }
+          if (supportsRange) {
+            return new Response(bytes.subarray(cut), {
+              status: 206,
+              headers: { 'content-range': `bytes ${String(cut)}-${String(bytes.length - 1)}/${String(bytes.length)}` },
+            })
+          }
+          return new Response(bytes, { status: 200 })
+        }) as typeof fetch,
+        nodeBinary: process.execPath,
+        platform: 'darwin',
+        runCommand: async (file, args) => {
+          if (file === 'tar') {
+            const target = args.at(-1)!
+            cpSync(fixtureRuntime, join(target, 'dsh-runtime'), { recursive: true })
+            cpSync(join(dirname(fixtureRuntime), RUNTIME_BUNDLE_MANIFEST), join(target, RUNTIME_BUNDLE_MANIFEST))
+            return { stderr: '', stdout: '' }
+          }
+          return { stderr: '', stdout: `${version}\n` }
+        },
+      })
+      await manager.command({ type: 'check' })
+      const interrupted = await manager.command({ type: 'install' })
+      assert.equal(interrupted.status, 'error')
+      if (interrupted.status === 'error') assert.equal(interrupted.stage, 'download')
+      const downloadsRoot = join(dataRoot, 'runtimes', 'downloads')
+      const partials = readdirSync(downloadsRoot)
+      assert.equal(partials.length, 1)
+      assert.equal(statSync(join(downloadsRoot, partials[0]!)).size, cut)
+      assert.equal(readRuntimePointer(dataRoot), null)
+
+      const installed = await manager.command({ type: 'install' })
+      if (installed.status === 'error') throw new Error(`${installed.stage}: ${installed.message}`)
+      assert.equal(installed.status, 'installed')
+      assert.deepEqual(ranges, [null, `bytes=${String(cut)}-`])
+      assert.equal(existsSync(downloadsRoot), false)
+      assert.equal(readRuntimePointer(dataRoot)?.version, version)
+    } finally {
+      rmSync(dataRoot, { recursive: true, force: true })
+      rmSync(fixtureRoot, { recursive: true, force: true })
+    }
+  })
+}
 
 test('runtime update manager reports up to date without a newer bundle', async () => {
   const dataRoot = mkdtempSync(join(tmpdir(), 'oh-dsh-runtime-uptodate-'))

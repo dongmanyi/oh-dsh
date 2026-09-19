@@ -245,6 +245,10 @@ Oh-DSH Desktop.
   platform. **Update Runtime** downloads it, verifies the published SHA-256
   checksum, stages it under `~/.ohdsh/runtimes/<version>/`, and smoke-checks
   `dsh --version` before activating anything.
+- If a runtime download is interrupted, **Update Runtime** continues from the
+  partial file on the next attempt when the release has a SHA-256 sidecar and
+  the server supports HTTP Range. A server that ignores Range triggers a full
+  download; activation still waits for checksum and smoke verification.
 - Activation writes the pointer `~/.ohdsh/runtimes/current.json` and restarts
   only the Harness process; the application keeps running.
 - **Use Bundled Runtime** removes the pointer and restarts the Harness on the

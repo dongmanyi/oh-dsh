@@ -209,6 +209,9 @@ token。
 - **Check Runtime** 查找为本平台发布的最新运行时包；**Update Runtime**
   下载后先校验发布的 SHA-256，暂存到 `~/.ohdsh/runtimes/<version>/`，
   并在激活前用 `dsh --version` 做冒烟检查。
+- 若运行时下载中断，下次点击 **Update Runtime** 时，只要该 Release 提供
+  SHA-256 校验文件且服务器支持 HTTP Range，就会从已下载的部分继续。
+  服务器忽略 Range 时会重新下载完整文件；校验和冒烟检查通过后才会激活。
 - 激活会写入指针 `~/.ohdsh/runtimes/current.json` 并只重启 Harness 进程，
   应用本身保持运行。
 - **Use Bundled Runtime** 删除指针并让 Harness 回到随应用内置的运行时。
