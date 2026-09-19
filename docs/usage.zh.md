@@ -85,6 +85,10 @@ pnpm run dist:mac && sh install.sh --local --surface desktop --force
 - 安装器读取 GitHub 为每个 Release 资产发布的 SHA-256 摘要，并在改动旧
   安装之前完成校验。下载失败、摘要不匹配或解压中断都会保持原安装可用并
   报告错误；未完成的暂存文件会被清理。
+- Windows 下载中断后，部分文件默认保留在 `%USERPROFILE%\.ohdsh\installer\downloads`
+  （或指定的 `-DataHome`）中。重新运行安装器会请求剩余字节；若镜像站不支持
+  HTTP Range，则重新下载整个文件。安装前始终校验 Release 发布的 SHA-256，
+  安装成功后删除下载缓存。
 - 重复执行且版本不变时为无操作，除非传入 `--force`。新版本会原子替换载荷
   并刷新 `ohdsh` 启动器。
 - 升级采用原地替换：新安装验证通过后，旧的应用包、AppImage 或载荷会连同

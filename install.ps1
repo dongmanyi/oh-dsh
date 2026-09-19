@@ -70,6 +70,68 @@ function Die {
     exit 1
 }
 
+function Save-ReleaseAsset {
+    param(
+        [string]$Url,
+        [string]$PartialPath,
+        [long]$ExpectedSize
+    )
+
+    $offset = 0L
+    if (Test-Path -LiteralPath $PartialPath) {
+        $offset = (Get-Item -LiteralPath $PartialPath).Length
+        if ($offset -ge $ExpectedSize) {
+            # A complete cached file is verified below; an oversized one is
+            # invalid and cannot be resumed.
+            if ($offset -eq $ExpectedSize) { return }
+            Remove-Item -LiteralPath $PartialPath -Force
+            $offset = 0L
+        }
+    }
+
+    $request = [System.Net.HttpWebRequest]::Create($Url)
+    $request.UserAgent = 'oh-dsh-install'
+    $request.Timeout = 60000
+    $request.ReadWriteTimeout = 60000
+    if ($offset -gt 0) { $request.AddRange($offset) }
+
+    $response = $request.GetResponse()
+    try {
+        $partial = $response.StatusCode -eq [System.Net.HttpStatusCode]::PartialContent
+        if ($partial) {
+            $contentRange = [string]$response.Headers['Content-Range']
+            if ($offset -eq 0 -or $contentRange -notmatch '^bytes (\d+)-\d+/(\d+)$' `
+                -or [long]$Matches[1] -ne $offset -or [long]$Matches[2] -ne $ExpectedSize) {
+                throw "unexpected Content-Range for $Url : $contentRange"
+            }
+        } elseif ($response.StatusCode -ne [System.Net.HttpStatusCode]::OK) {
+            throw "unexpected HTTP status $([int]$response.StatusCode) for $Url"
+        }
+
+        # Some mirrors ignore Range and return 200; overwrite the partial file
+        # in that case instead of appending a second full archive.
+        $mode = if ($partial) { [System.IO.FileMode]::Append } else { [System.IO.FileMode]::Create }
+        $output = [System.IO.File]::Open($PartialPath, $mode, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $inputStream = $response.GetResponseStream()
+            try {
+                $inputStream.CopyTo($output)
+            } finally {
+                $inputStream.Dispose()
+            }
+        } finally {
+            $output.Dispose()
+        }
+    } finally {
+        $response.Dispose()
+    }
+
+    $actualSize = (Get-Item -LiteralPath $PartialPath).Length
+    if ($actualSize -ne $ExpectedSize) {
+        throw "incomplete download for $Url : expected $ExpectedSize bytes, got $actualSize bytes"
+    }
+}
+
 function Get-Arch {
     if ($Arch -ne '') {
         if ($Arch -notin @('x64', 'arm64')) {
@@ -533,6 +595,9 @@ if (-not $Digest.StartsWith('sha256:')) {
     Die "release $Tag publishes no sha256 digest for $AssetName; verify the asset list at https://github.com/$Repo/releases/tag/$Tag"
 }
 $ExpectedHash = $Digest.Substring(7).ToLowerInvariant()
+if ($ExpectedHash -notmatch '^[0-9a-f]{64}$' -or [long]$Asset.size -le 0) {
+    Die "release $Tag has invalid asset metadata for $AssetName"
+}
 
 # ---------------------------------------------------------------------------
 # Idempotency
@@ -595,15 +660,17 @@ if (-not $Force) {
 # ---------------------------------------------------------------------------
 
 $WorkDir = New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("oh-dsh-install-{0}" -f ([guid]::NewGuid().ToString('N')))) -Force
+$DownloadCache = Join-Path $DataHome 'downloads'
+New-Item -ItemType Directory -Path $DownloadCache -Force | Out-Null
+$Archive = Join-Path $DownloadCache "$AssetName.$ExpectedHash.part"
+$InstallSucceeded = $false
 try {
-    $Archive = Join-Path $WorkDir $AssetName
     $Url = "$DownloadBase/$Repo/releases/download/$Tag/$AssetName"
     Write-Step "Downloading $AssetName"
     # The token is for the GitHub API only; downloads never carry it, so a
     # custom -DownloadBase mirror cannot receive the credential.
-    $downloadHeaders = @{ 'User-Agent' = 'oh-dsh-install' }
     try {
-        Invoke-WebRequest -Uri $Url -OutFile $Archive -Headers $downloadHeaders -UseBasicParsing
+        Save-ReleaseAsset -Url $Url -PartialPath $Archive -ExpectedSize ([long]$Asset.size)
     } catch {
         Die "failed to download $Url : $($_.Exception.Message)"
     }
@@ -623,6 +690,7 @@ try {
     }
     $ActualHash = ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
     if ($ActualHash -ne $ExpectedHash) {
+        Remove-Item -LiteralPath $Archive -Force
         Die "checksum mismatch for $AssetName : expected sha256:$ExpectedHash, got sha256:$ActualHash; the previous installation was left untouched"
     }
     Write-Step "Verified sha256:$ExpectedHash"
@@ -682,6 +750,7 @@ try {
             }
         }
         Write-Step "Installed Oh-DSH Desktop $ReleaseVersion$(if ($Dest) { " to $Dest" })"
+        $InstallSucceeded = $true
         exit 0
     }
 
@@ -788,8 +857,12 @@ try {
     Write-Step "Launcher: $ShimPath"
 
     Ensure-UserPath -Directory $FinalBinDir
+    $InstallSucceeded = $true
 } finally {
     Remove-Item -LiteralPath $WorkDir -Recurse -Force -ErrorAction SilentlyContinue
+    if ($InstallSucceeded) {
+        Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Step 'Done'

@@ -173,6 +173,76 @@ const env = {}
   }
 })
 
+test('interrupted Windows download resumes the remaining bytes on rerun', { skip: skipReason }, async () => {
+  const github = new MockGitHub()
+  await github.start()
+  try {
+    const asset = await makeWindowsSurfaceArchive('tui', '0.1.8', 'resumed')
+    github.publish('v0.1.8', [asset])
+    github.truncateAsset('v0.1.8', asset.name)
+    const home = await makeSandbox()
+    const dataHome = join(home, 'data')
+    const payload = join(home, 'payload')
+    const args = [
+      '-Surface', 'tui',
+      '-ApiBase', github.apiBase,
+      '-DownloadBase', github.downloadBase,
+      '-Dest', payload,
+      '-BinDir', join(home, 'bin'),
+      '-DataHome', dataHome,
+    ]
+
+    const interrupted = await runInstaller(args, {})
+    assert.notEqual(interrupted.status, 0)
+    const partialFiles = await readdir(join(dataHome, 'downloads'))
+    assert.equal(partialFiles.length, 1)
+    const partial = await readFile(join(dataHome, 'downloads', partialFiles[0]!))
+    assert.ok(partial.length > 0 && partial.length < asset.bytes.length)
+    assert.ok(!(await exists(payload)))
+
+    github.truncateAsset('v0.1.8', asset.name, false)
+    const resumed = await runInstaller(args, {})
+    assert.equal(resumed.status, 0, resumed.stderr)
+    assert.deepEqual(github.downloadRangeHeaders('v0.1.8', asset.name), [
+      undefined,
+      `bytes=${partial.length}-`,
+    ])
+    assert.match(await readFile(join(payload, 'bin', 'ohdsh.cmd'), 'utf8'), /resumed/)
+    assert.deepEqual(await readdir(join(dataHome, 'downloads')), [])
+  } finally {
+    await github.stop()
+  }
+})
+
+test('Windows installer restarts safely when a mirror ignores Range', { skip: skipReason }, async () => {
+  const github = new MockGitHub()
+  await github.start()
+  try {
+    const asset = await makeWindowsSurfaceArchive('web', '0.1.8', 'full-fallback')
+    github.publish('v0.1.8', [asset])
+    github.truncateAsset('v0.1.8', asset.name)
+    const home = await makeSandbox()
+    const args = [
+      '-Surface', 'web',
+      '-ApiBase', github.apiBase,
+      '-DownloadBase', github.downloadBase,
+      '-Dest', join(home, 'payload'),
+      '-BinDir', join(home, 'bin'),
+      '-DataHome', join(home, 'data'),
+    ]
+    assert.notEqual((await runInstaller(args, {})).status, 0)
+
+    github.truncateAsset('v0.1.8', asset.name, false)
+    github.ignoreRangeRequests = true
+    const retried = await runInstaller(args, {})
+    assert.equal(retried.status, 0, retried.stderr)
+    assert.match(github.downloadRangeHeaders('v0.1.8', asset.name)[1] ?? '', /^bytes=\d+-$/)
+    assert.match(await readFile(join(home, 'payload', 'bin', 'ohdsh.cmd'), 'utf8'), /full-fallback/)
+  } finally {
+    await github.stop()
+  }
+})
+
 test('same-version reruns are no-ops and upgrades clean staged leftovers', { skip: skipReason }, async () => {
   const github = new MockGitHub()
   await github.start()

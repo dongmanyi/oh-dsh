@@ -96,6 +96,12 @@ Upgrade, verification, and uninstall behavior:
   installation. A failed download, checksum mismatch, or interrupted
   extraction leaves the previous install usable and reports the failure;
   partially staged files are cleaned up.
+- On Windows, an interrupted asset download keeps its partial file under
+  `%USERPROFILE%\.ohdsh\installer\downloads` by default (or the chosen
+  `-DataHome`). Re-run the installer to request the remaining bytes. If a
+  mirror ignores HTTP Range,
+  it downloads the full asset again; the published SHA-256 is always checked
+  before installation. Verified downloads are removed after success.
 - Re-running the installer with the same version is a no-op unless `--force`
   is passed. A newer version replaces the payload and refreshes the `ohdsh`
   launcher atomically.
