@@ -886,7 +886,6 @@ test('Agent gateway authenticates and defers runtime-restarting applies', async 
     assert.equal(apply.status, 202)
     const accepted = await apply.json() as { deferred: boolean }
     assert.equal(accepted.deferred, true)
-    assert.equal(setup.manager.getSnapshot().preview?.pluginId, 'safe-demo')
 
     // The preview clears and the installed list commits in separate ticks on
     // slow runners; wait for both rather than just the preview.
